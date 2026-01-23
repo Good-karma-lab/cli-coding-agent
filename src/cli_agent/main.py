@@ -93,12 +93,54 @@ class CLIAgent:
 
     def __post_init__(self):
         """Initialize all components."""
-        model = self.config.llm.default_model
+        model = self.config.llm.model
+
+        # Create simple LLM client wrapper for components that need it
+        class SimpleLLMClient:
+            def __init__(self, model_name):
+                self.model = model_name
+                # Get API credentials from environment
+                self.api_key = (
+                    os.getenv("ANTHROPIC_AUTH_TOKEN")
+                    or os.getenv("ANTHROPIC_API_KEY")
+                    or os.getenv("OPENAI_API_KEY")
+                )
+                self.api_base = (
+                    os.getenv("ANTHROPIC_BASE_URL")
+                    or os.getenv("OPENAI_API_BASE")
+                )
+
+            async def complete(self, prompt, **kwargs):
+                call_kwargs = {
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                if self.api_key:
+                    call_kwargs["api_key"] = self.api_key
+                if self.api_base:
+                    call_kwargs["api_base"] = self.api_base
+                call_kwargs.update(kwargs)
+                response = await litellm.acompletion(**call_kwargs)
+                return response.choices[0].message.content
+
+        class SimpleEmbeddingClient:
+            def __init__(self, model_name="text-embedding-3-small"):
+                self.model = model_name
+            async def embed(self, text):
+                # Placeholder - return zero vector for now
+                return [0.0] * 384
+
+        llm_client = SimpleLLMClient(model)
+        embedding_client = SimpleEmbeddingClient()
 
         # Core
         self.state = AgentState()
-        self.rlm = RLMEngine(model=model, max_recursion_depth=self.config.rlm.max_depth)
-        self.memory = MemoryManager(model=model)
+        self.rlm = RLMEngine(model=model, max_recursion_depth=self.config.rlm.max_recursion_depth)
+        self.memory = MemoryManager(
+            config=self.config.memory,
+            llm_client=llm_client,
+            embedding_client=embedding_client,
+        )
         self.episodic = EpisodicMemory()
 
         # Planning
@@ -112,14 +154,14 @@ class CLIAgent:
         )
         self.loongflow = LoongFlowPES(
             model=model,
-            verify_contracts=self.config.planning.verify_contracts,
+            verify_contracts=self.config.planning.pes_verification_contracts,
         )
         self.veriplan = VeriPlan(model=model)
 
         # Agents
         self.mar = MultiAgentReflexion(
             model=model,
-            max_rounds=self.config.validation.mar_rounds,
+            max_rounds=self.config.validation.mar_max_iterations,
         )
         self.orchestrator = Orchestrator(model=model)
         self.agent_coder = AgentCoder(
@@ -158,7 +200,7 @@ class CLIAgent:
 
     def _register_subagents(self):
         """Register specialized subagents with orchestrator."""
-        model = self.config.llm.default_model
+        model = self.config.llm.model
 
         self.orchestrator.register_agent(
             "planner",
@@ -214,7 +256,8 @@ class CLIAgent:
 
             try:
                 # Start episode for reflexion
-                episode_id = self.episodic.start_episode(task)
+                episode_id = f"episode_{start_time.timestamp()}"
+                self.episodic.start_episode(episode_id, task)
 
                 # Show task
                 self.ui.show_task(task)
@@ -281,7 +324,8 @@ class CLIAgent:
         rlm_result = await self.rlm.process_with_recursion(
             f"Analyze this coding task and identify key requirements: {task}"
         )
-        context["analysis"] = rlm_result.get("result", "")
+        # process_with_recursion returns a string directly
+        context["analysis"] = rlm_result if isinstance(rlm_result, str) else rlm_result.get("result", "")
 
         # Search relevant files if LSPRAG available
         if self.lsprag:
@@ -289,7 +333,7 @@ class CLIAgent:
             context["relevant_files"] = relevant
 
         # Retrieve relevant memories
-        memory_context = await self.memory.retrieve(task, limit=5)
+        memory_context = await self.memory.recall(task, top_k=5)
         context["memory_context"] = memory_context
 
         # Check for past similar tasks
@@ -472,8 +516,8 @@ async def main():
 
     args = parser.parse_args()
 
-    # Load config
-    config = load_config(args.config) if args.config else AgentConfig()
+    # Load config (from file if specified, otherwise from environment)
+    config = load_config(args.config)
 
     # Create agent
     agent = CLIAgent(

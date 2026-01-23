@@ -57,12 +57,51 @@ class RLMEngine:
 
     def __init__(
         self,
-        llm_client: Any,
+        llm_client: Any = None,
         sub_model_client: Optional[Any] = None,
         max_recursion_depth: int = 5,
         chunk_size: int = 4000,
         repl_timeout: int = 30,
+        model: Optional[str] = None,
     ):
+        # Support both llm_client (object) and model (string) initialization
+        self.model = model
+
+        # Create simple client wrapper if model string is provided but no client
+        if llm_client is None and model is not None:
+            import os
+            import litellm
+
+            class SimpleLLMClient:
+                def __init__(self, model_name):
+                    self.model = model_name
+                    # Get API credentials from environment
+                    self.api_key = (
+                        os.getenv("ANTHROPIC_AUTH_TOKEN")
+                        or os.getenv("ANTHROPIC_API_KEY")
+                        or os.getenv("OPENAI_API_KEY")
+                    )
+                    self.api_base = (
+                        os.getenv("ANTHROPIC_BASE_URL")
+                        or os.getenv("OPENAI_API_BASE")
+                    )
+
+                async def complete(self, prompt, **kwargs):
+                    call_kwargs = {
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": prompt}],
+                    }
+                    if self.api_key:
+                        call_kwargs["api_key"] = self.api_key
+                    if self.api_base:
+                        call_kwargs["api_base"] = self.api_base
+                    call_kwargs.update(kwargs)
+
+                    response = await litellm.acompletion(**call_kwargs)
+                    return response.choices[0].message.content
+
+            llm_client = SimpleLLMClient(model)
+
         self.llm = llm_client
         self.sub_model = sub_model_client or llm_client
         self.max_recursion_depth = max_recursion_depth

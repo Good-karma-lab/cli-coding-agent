@@ -218,6 +218,7 @@ class PlanningConfig(BaseModel):
 
     # Tree of Thoughts
     tot_num_thoughts: int = Field(default=3, description="Thoughts to generate per step")
+    tot_depth: int = Field(default=5, description="Maximum depth for Tree of Thoughts")
     tot_evaluation_strategy: str = Field(default="vote", description="vote, score, debate")
 
     # LoongFlow PES (Plan/Execute/Summary)
@@ -257,6 +258,7 @@ class ValidationConfig(BaseModel):
         default=["actor", "diagnostician", "critic", "aggregator"]
     )
     mar_max_iterations: int = Field(default=5)
+    max_iterations: int = Field(default=10, description="Maximum agent iterations")
 
     # Reflexion self-improvement
     reflexion_enabled: bool = True
@@ -281,6 +283,8 @@ class SandboxConfig(BaseModel):
     """
     # DeepAgents built-in sandbox
     use_deepagents_sandbox: bool = True
+    timeout: int = Field(default=300, description="Sandbox execution timeout in seconds")
+    network_enabled: bool = Field(default=False, description="Enable network access in sandbox")
 
     # Fallback Docker config
     docker_enabled: bool = False
@@ -413,12 +417,31 @@ class AgentConfig(BaseModel):
         """Create configuration from environment variables."""
         config = cls()
 
-        # LLM settings from env
-        if api_key := os.getenv("LITELLM_API_KEY") or os.getenv("OPENAI_API_KEY"):
+        # LLM settings from env (supports multiple providers)
+        if api_key := (
+            os.getenv("ANTHROPIC_AUTH_TOKEN")
+            or os.getenv("ANTHROPIC_API_KEY")
+            or os.getenv("LITELLM_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+        ):
             config.llm.api_key = api_key
-        if api_base := os.getenv("LITELLM_API_BASE") or os.getenv("OPENAI_API_BASE"):
+
+        api_base = (
+            os.getenv("ANTHROPIC_BASE_URL")
+            or os.getenv("LITELLM_API_BASE")
+            or os.getenv("OPENAI_API_BASE")
+        )
+        if api_base:
             config.llm.api_base = api_base
-        if model := os.getenv("CLI_AGENT_MODEL"):
+
+        if model := (
+            os.getenv("ANTHROPIC_MODEL")
+            or os.getenv("CLI_AGENT_MODEL")
+        ):
+            # If using a custom proxy with base URL, prepend openai/ for compatibility
+            # unless it already has the prefix
+            if api_base and not model.startswith("openai/"):
+                model = f"openai/{model}"
             config.llm.model = model
 
         # Langfuse from env
